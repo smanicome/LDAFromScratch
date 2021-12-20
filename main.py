@@ -77,7 +77,7 @@ documents = fetch_20newsgroups(
 	subset='train',
 	remove=('headers', 'footers', 'quotes'),
 	shuffle=True,
-).data[:500]
+).data[:1000]
 
 print(str(len(documents)) + " documents")
 topics = [i for i in range(20)]
@@ -86,7 +86,7 @@ dictionary = {}
 
 # remove useless words and punctuations
 def preprocess(text):
-	doc = simple_preprocess(text)
+	doc = simple_preprocess(text, min_len=3)
 	return list(filter(lambda word: word not in STOPWORDS, doc))
 
 
@@ -115,13 +115,12 @@ def bag_of_words(docs):
 
 def tf_idf(word, number_of_words_in_doc, number_of_docs):
 	tfidf = (word[1] / number_of_words_in_doc) * (np.log((number_of_docs + 1) / (dictionary[word[0]] + 1)) + 1)
-	tfidf_data.append((word[0], str(tfidf), str(word[1]), str(number_of_words_in_doc), str(number_of_docs), str(dictionary[word[0]]), str((np.log((number_of_docs + 1) / (dictionary[word[0]] + 1)) + 1))))
 	return tfidf
 
 
 # Filter most relevant words of the document based on tf_idf
 def compute_tf_idfs(docs):
-	return [[word for word in doc if 0.5 < (tf_idf(word, functools.reduce(lambda a, b: a + b, [occ for (_, occ) in doc], 0), len(docs))) < 2] for doc in docs]
+	return [[word for word in doc if 0.8 < (tf_idf(word, functools.reduce(lambda a, b: a + b, [occ for (_, occ) in doc], 0), len(docs))) < 1.2] for doc in docs]
 
 
 # Associates each word with a random topic
@@ -198,15 +197,13 @@ if __name__ == '__main__':
 	processed_docs = [preprocess(doc) for doc in documents]
 	create_dictionary(processed_docs)
 	bows = bag_of_words(processed_docs)
-
-	tfidf_data = []
 	filtered = compute_tf_idfs(bows)
 
-	for name, _tf_idf, occ, doc_len, corpus_len, dict_value, idf in sorted(tfidf_data, key=operator.itemgetter(1),):
-		print("{: <15} {: <25} {: <5} {: <5} {: <5} {: <5} {: <10}".format(name, _tf_idf, occ, doc_len, corpus_len, dict_value, idf))
+	model = randomize_topics_distribution(filtered)
 
-	before_sorting = randomize_topics_distribution(filtered)
-	model = sort_topics(before_sorting)
+	for i in range(100):
+		model = sort_topics(model)
+
 	print_topics()
 
 # bow_corpus = [dictionary.doc2bow(doc) for doc in processed_docs]
