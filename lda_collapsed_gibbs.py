@@ -1,13 +1,12 @@
 import functools
-import math
+import operator
 
 import nltk
 import numpy as np
 from gensim.utils import simple_preprocess
 from nltk.corpus import stopwords
+from scipy.constants import psi
 from sklearn.datasets import fetch_20newsgroups
-import operator
-import random
 
 nltk.download('stopwords')
 STOPWORDS = list(stopwords.words('english'))
@@ -73,15 +72,14 @@ STOPWORDS.extend([
 STOPWORDS.extend(['article'])  # 20newsgroups specifics
 STOPWORDS.extend(['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'])
 
-documents = fetch_20newsgroups(
-	subset='train',
-	remove=('headers', 'footers', 'quotes'),
-	shuffle=True,
-).data[:1000]
+categories = ['sci.crypt',
+              'sci.electronics',
+              'sci.med',
+              'sci.space']
 
-print(str(len(documents)) + " documents")
-topics = [i for i in range(20)]
-dictionary = {}
+
+def get_vocabulary(corpus):
+	return list(set([word for doc in corpus for word in doc]))
 
 
 # remove useless words and punctuations
@@ -90,128 +88,132 @@ def preprocess(text):
 	return list(filter(lambda word: word not in STOPWORDS, doc))
 
 
-# Fill dictionary which will be used for tf_idf
-def create_dictionary(docs):
-	for doc in docs:
-		for word in set(doc):
-			if word not in dictionary:
-				dictionary[word] = 1
-			else:
-				dictionary[word] += 1
+class LDA:
+	def __init__(self, topic_number):
+		self.K = topic_number
+		self.vocabulary = None
+		self.n_d_k = None
+		self.n_k_w = None
+		self.n_k = None
+		self.z = None
+		self.alpha = [0.01 for _ in range(topic_number)]
+		self.beta = 0.01
+		self.theta = None
+		self.phi = None
+
+	def gibbs_sampling(self, doc_index, word_index, word, doc):
+		topic = self.z[doc_index][word_index]
+		self.n_d_k[doc_index][topic] -= 1
+		self.n_k_w[topic][self.vocabulary.index(word)] -= 1
+		self.n_k[topic] -= 1
+
+		p_k = np.zeros(self.K)
+		for t in range(self.K):
+			p_k[t] = (self.n_d_k[doc_index][t] + self.alpha[t]) / (len(doc) - 1 + np.sum(self.alpha)) * (
+					self.n_k_w[t][self.vocabulary.index(word)] + self.beta) / (self.n_k[t] + self.beta)
+		p_k /= np.sum(p_k)
+		# print("{: <20} {} {}".format(sum(p_k), doc_index, word_index))
+		topic = np.random.multinomial(1, p_k).argmax()
+
+		self.z[doc_index][word_index] = topic
+		self.n_d_k[doc_index][topic] += 1
+		self.n_k_w[topic][self.vocabulary.index(word)] += 1
+		self.n_k[topic] += 1
+
+	def train(self, corpus, iterations, burn_in, ):
+		self.vocabulary = get_vocabulary(corpus)
+		self.n_d_k = np.zeros([len(corpus), self.K])  # number of words assigned to topic k in document d
+		self.n_k_w = np.zeros([self.K, len(self.vocabulary)])  # number of times word w is assigned to topic k
+		self.n_k = np.zeros(self.K)  # total number of times any word is assigned to topic k
+		self.z = {}  # current topic assignment for each of the N words in the corpus
+		self.theta = np.zeros([len(corpus), self.K])
+		self.phi = np.zeros([self.K, len(self.vocabulary)])
+
+		# initialisation
+		for i in range(len(corpus)):
+			self.z[i] = {}
+
+		for doc_index, doc in enumerate(corpus):
+			for word_index, word in enumerate(doc):
+				topic = np.random.randint(0, self.K)
+				self.n_d_k[doc_index][topic] += 1
+				self.n_k_w[topic][self.vocabulary.index(word)] += 1
+				self.n_k[topic] += 1
+				self.z[doc_index][word_index] = topic
+
+		# training
+		for i in range(iterations):
+			print("---------- Iteration {} -----------".format(i))
+			for doc_index, doc in enumerate(corpus):
+				for word_index, word in enumerate(doc):
+					self.gibbs_sampling(doc_index, word_index, word, doc)
+
+			if i < burn_in:
+				for doc_index in range(len(corpus)):
+					for topic in range(self.K):
+						self.theta[doc_index][topic] += \
+							(self.n_d_k[doc_index][topic] + self.alpha[topic]) / \
+							(np.sum(self.n_d_k[doc_index]) + np.sum(self.alpha))
+				for topic in range(self.K):
+					for word_index in range(len(self.vocabulary)):
+						self.phi[topic][word_index] += \
+							(self.n_k_w[topic][word_index] + self.beta) / \
+							(self.n_k[topic] + self.beta)
+
+	def print_topics(self):
+		for t in range(self.K):
+			word_distribution = []
+			for word_index, word_occ in enumerate(self.n_k_w[t]):
+				word_distribution.append((word_occ / self.n_k[t], self.vocabulary[word_index]))
+
+			print(
+				"Topic {}: {}".format(t + 1, sorted(word_distribution, key=operator.itemgetter(0), reverse=True)[:10]))
+
+	def test_classify(self):
+		testDataset = fetch_20newsgroups(subset='test', remove=('headers', 'footers', 'quotes'), categories=categories)
+
+		for doc_index, doc in enumerate([preprocess(doc) for doc in testDataset.data[:20]]):
+			topic_distribution = np.zeros(self.K)
+
+			for word in doc:
+				if self.vocabulary.count(word) == 0:
+					continue
+
+				topic = np.argmax([word_distribution[self.vocabulary.index(word)] for word_distribution in self.n_k_w])
+				topic_distribution[topic] += 1
 
 
-def bag_of_words(docs):
-	list_of_bow = []
-	for doc in docs:
-		bow = {}
-		for word in doc:
-			if word in bow:
-				bow[word] += 1
-			else:
-				bow[word] = 1
-		list_of_bow.append(list(bow.items()))
-	return list_of_bow
+			# for word in doc:
+			# 	if self.vocabulary.count(word) == 0:
+			# 		continue
+			# 	topic = np.random.randint(0, self.K)
+			# 	topic_distribution[topic] += 1
+			#
+			# for word in doc:
+			# 	if self.vocabulary.count(word) == 0:
+			# 		continue
+			#
+			# 	p_k = np.zeros(self.K)
+			# 	for t in range(self.K):
+			# 		p_k[t] = (topic_distribution[t] + self.alpha[t]) / (len(doc) - 1 + np.sum(self.alpha)) * (
+			# 				self.n_k_w[t][self.vocabulary.index(word)] + self.beta) / (self.n_k[t] + self.beta)
+			# 	p_k /= np.sum(p_k)
+			# 	topic_distribution[np.random.multinomial(1, p_k).argmax()] += 1
 
-
-def tf_idf(word, number_of_words_in_doc, number_of_docs):
-	tfidf = (word[1] / number_of_words_in_doc) * (np.log((number_of_docs + 1) / (dictionary[word[0]] + 1)) + 1)
-	return tfidf
-
-
-# Filter most relevant words of the document based on tf_idf
-def compute_tf_idfs(docs):
-	return [[word for word in doc if 0.8 < (tf_idf(word, functools.reduce(lambda a, b: a + b, [occ for (_, occ) in doc], 0), len(docs))) < 1.2] for doc in docs]
-
-
-# Associates each word with a random topic
-def randomize_topics_distribution(docs):
-	doc_list = []
-
-	for doc in docs:
-		sublist = []
-		for word in doc:
-			sublist.append((word, random.choice(topics)))
-		doc_list.append(sublist)
-
-	return doc_list
-
-
-# Returns the topic distribution
-def get_topic_distribution_in_list(doc):
-	topics_in_doc = {}
-	for t in topics:
-		topics_in_doc[t] = 0
-
-	for w in doc:
-		topics_in_doc[w[1]] += 1 * w[0][1]
-	return topics_in_doc
-
-
-# Sort word distribution through Gibbs sampling
-def sort_topics(docs):
-	flatlist = [item for sublist in docs for item in sublist]
-
-	doc_list = []
-	for doc in docs:
-		sublist = []
-		for word in doc:
-			topic_distribution_in_doc = get_topic_distribution_in_list(doc)
-			corpus_word = list(filter(lambda item: item[0][0] == word[0][0], flatlist))
-			word_distribution_in_corpus = get_topic_distribution_in_list(corpus_word)
-
-			topics_weight = []
-			for t in topics:
-				weight = (topic_distribution_in_doc[t] + 1) * (word_distribution_in_corpus[t] + 1)
-				topics_weight.append((t, weight))
-			topic_selected = max(topics_weight, key=operator.itemgetter(1))
-			sublist.append((word[0], topic_selected[0]))
-
-		doc_list.append(sublist)
-
-	return doc_list
-
-
-# Display word distribution of each topic - UNSURE OF THE RESULT
-def print_topics():
-	flatlist = [item for sublist in model for item in sublist]
-	for t in topics:
-		word_distribution = []
-		words_in_topic = list(filter(lambda item: item[1] == t, flatlist))
-		words_in_topic_occ = (functools.reduce(lambda a, b: a + b, [occ for ((_, occ), __) in words_in_topic], 0))
-
-		marked_words = []
-		for word in words_in_topic:
-			if word[0][0] in marked_words:
-				continue
-			marked_words.append(word[0][0])
-
-			word_in_topic = list(filter(lambda item: item[0][0] == word[0][0], flatlist))
-			word_in_topic_occ = (functools.reduce(lambda a, b: a + b, [occ for ((_, occ), __) in word_in_topic], 0))
-
-			word_distribution.append((word_in_topic_occ / words_in_topic_occ, word[0][0]))
-
-		print('Topic ' + str(t) + ": " + str(sorted(word_distribution, key=operator.itemgetter(0), reverse=True)[:10]))
+			target = testDataset.target_names[testDataset.target[doc_index]]
+			print(
+				"Document {: <11} Classified {: <13} Actual {}".format(doc_index + 1, np.argmax(topic_distribution) + 1,
+				                                                       target))
 
 
 if __name__ == '__main__':
-	processed_docs = [preprocess(doc) for doc in documents]
-	create_dictionary(processed_docs)
-	bows = bag_of_words(processed_docs)
-	filtered = compute_tf_idfs(bows)
+	lda = LDA(6)
 
-	model = randomize_topics_distribution(filtered)
+	trainDataset = fetch_20newsgroups(subset='train', remove=('headers', 'footers', 'quotes'), categories=categories).data[:100]
 
-	for i in range(100):
-		model = sort_topics(model)
-
-	print_topics()
-
-# bow_corpus = [dictionary.doc2bow(doc) for doc in processed_docs]
-# tfidf = TfidfModel(bow_corpus)
-# corpus_tfidf = tfidf[bow_corpus]
-# lda_model = LdaMulticore(corpus_tfidf, num_topics=6, id2word=dictionary, passes=2, workers=2)
-#
-# unseen_document = 'I hate everyone'
-# bow_vector = dictionary.doc2bow(preprocess(unseen_document))
-# for index, score in sorted(lda_model[bow_vector], key=lambda tup: -1 * tup[1]):
-# 	print("Score: {}\t Topic: {}".format(score, lda_model.print_topic(index, 5)))
+	documents = [preprocess(doc) for doc in trainDataset]
+	lda.train(documents, 20, 5)
+	lda.print_topics()
+	lda.test_classify()
+# print("Theta: {}".format(lda.theta))
+# print("Phi: {}".format(lda.phi))
